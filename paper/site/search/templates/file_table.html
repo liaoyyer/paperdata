@@ -8,8 +8,8 @@
 	<thead>
 		<tr>
 			<th style='width:10%'>Host</th>
-			<th style='width:50%'>Full Path</th>
-			<th style='width:30%'>Obsnum</th>
+			<th style='width:50%'>Source Path</th>
+			<th style='width:20%'>Obsnum</th>
 			<th style='width:10%'>Filesize (MB)</th>
 		</tr>
 	</thead>
@@ -17,7 +17,7 @@
 		{% for paper_file in log_list %}
 		<tr>
 			<td>{{ paper_file['host'] }}</td>
-			<td>{{ paper_file['full_path'] }}</td>
+			<td>{{ paper_file['source'] }}</td>
 			<td>{{ paper_file['obsnum'] }}</td>
 			<td>{{ paper_file['filesize'] }}</td>
 		</tr>

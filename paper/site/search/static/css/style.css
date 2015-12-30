@@ -1,4 +1,4 @@
-#error_table, #obs_table, #file_table, #set_construction_div, #comments_div {
+#error_table, #obs_table, #file_table {
 	width: 100%;
 	max-width: 100%;
 	max-height: 400px;
@@ -8,17 +8,22 @@
 #error_table, #obs_table, #file_table table {
 	table-layout: fixed;
 	float: left;
-	width: 50%;
-	max-width: 50%;
+	width: 100%;
+	max-width: 100%;
 	word-wrap: break-word;
-}
-
-#summary_table th, #summary_table td {
 	text-align: center;
 }
 
-#summary_table table {
+#data_summary_table, #day_summary_table th {
+	text-align: center;
+}
+
+#data_summary_table, #day_summary_table td {
+	text-align: center;
+}
+#data_summary_table, #day_summary_table table {
 	width: 100%;
+	text-align: center;
 }
 
 .scrolledList {

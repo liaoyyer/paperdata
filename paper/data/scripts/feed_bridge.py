@@ -1,194 +1,161 @@
-#!/usr/bin/python
-# -*- coding: utf-8 -*-
-# Load data into MySQL table 
+'''
+paper.data.scripts.feed_bridge
 
+adds files to the paperdistiller database and updates the feed table
+
+author | Immanuel Washington
+
+Functions
+---------
+set_feed_table | updates database with feed file status
+move_feed_files | parses list of files then moves them
+count_days | counts the amount of files in each julian day and updates feed table
+find_data | finds files which can be added to paperdistiller
+feed_bridge | finds files to move, adds to paperdistiller after move
+'''
 from __future__ import print_function
 import os
 import time
 import shutil
 import socket
-import subprocess
-import smtplib
 import paper as ppdata
 from paper.data import dbi as pdbi
+import paper.memory as memory
+import distill_files
 import move_files
 from sqlalchemy import func
 from sqlalchemy.sql import label
-from email.MIMEMultipart import MIMEMultipart
-from email.MIMEBase import MIMEBase
-from email import Encoders
 
-### Script to load paperdistiller with files from the paperfeed table
-### Checks /data4 for space, moves entire days of data, then loads into paperdistiller
+def set_feed_table(s, dbi, source_host, source_path, dest_host, dest_path, is_moved=True):
+    '''
+    updates table for feed file
 
-### Author: Immanuel Washington
-### Date: 11-23-14
+    Parameters
+    ----------
+    s | object: session object
+    dbi | object: database interface object
+    source_host | str: user host
+    source_path | str: source file path
+    dest_host | str: output host
+    dest_path | str: output directory
+    is_moved | bool: checks whether to move to paperdistiller --defaults to True
+    '''
+    source = ':'.join((source_host, source_path))
+    FEED = dbi.get_entry(s, 'Feed', source)
+    feed_dict = {'host': dest_host,
+                'base_path': dest_path,
+                'is_moved': is_moved,
+                'timestamp': int(time.time())}
+    dbi.set_entry_dict(s, FEED, feed_dict)
 
-def set_feed(s, dbi, source, output_host, output_dir, is_moved=True):
-	'''
-	updates table for feed file
+def move_feed_files(dbi, source_host, source_paths, dest_host, dest_path):
+    '''
+    moves files and adds to feed directory and table
 
-	Args:
-		s (object): session object
-		dbi (object): database interface object
-		source (str): source file
-		output_host (str): output host
-		output_dir (str): output directory
-		is_moved (bool): checks whether to move to paperdistiller --defaults to False
-	'''
-	FEED = dbi.get_entry(s, 'Feed', source)
-	dbi.set_entry(s, FEED, 'host', output_host)
-	dbi.set_entry(s, FEED, 'path', output_dir)
-	dbi.set_entry(s, FEED, 'is_moved', is_moved)
+    Parameters
+    ----------
+    dbi | object: database interface object
+    source_host | str: file host
+    source_paths | list[str]: file paths
+    dest_host | str: output host
+    dest_path | str: output directory
+    '''
+    #different from move_files, adds to feed
+    named_host = socket.gethostname()
+    destination = ':'.join((dest_host, dest_path))
+    with dbi.session_scope() as s:
+        if named_host == source_host:
+            for source_path in source_paths:
+                ppdata.rsync_copy(source_path, destination)
+                set_feed_table(s, dbi, source_host, source_path, dest_host, dest_path)
+                shutil.rmtree(source_path)
+        else:
+            with ppdata.ssh_scope(source_host) as ssh:
+                for source_path in source_paths:
+                    rsync_copy_command = '''rsync -ac {source_path} {destination}'''.format(source_path=source_path, destination=destination)
+                    rsync_del_command = '''rm -r {source_path}'''.format(source_path=source_path)
+                    ssh.exec_command(rsync_copy_command)
+                    set_feed_table(s, dbi, source_host, source_path, dest_host, dest_path)
+                    ssh.exec_command(rsync_del_command)
 
-	return None
-
-def move_feed_files(dbi, input_host, input_paths, output_host, output_dir):
-	'''
-	moves files and adds to feed directory and table
-
-	Args:
-		dbi (object): database interface object
-		input_host (str): file host
-		input_paths (list): file paths
-		source (str): source file
-		output_host (str): output host
-		output_dir (str): output directory
-	'''
-	#different from move_files, adds to feed
-	named_host = socket.gethostname()
-	destination = ''.join((output_host, ':', output_dir))
-	if named_host == input_host:
-		with dbi.session_scope() as s:
-			for source in input_paths:
-				ppdata.rsync_copy(source, destination)
-				set_feed(s, dbi, source, output_host, output_dir)
-				shutil.rmtree(source)
-	else:
-		with ppdata.ssh_scope(input_host) as ssh:
-			for source in input_paths:
-				rsync_copy_command = '''rsync -ac {source} {destination}'''.format(source=source, destination=destination)
-				rsync_del_command = '''rm -r {source}'''.format(source=source)
-				ssh.exec_command(rsync_copy_command)
-				set_feed(source, output_host, output_dir)
-				ssh.exec_command(rsync_del_command)
-
-	print('Completed transfer')
-
-	return None
+    print('Completed transfer')
 
 def count_days(dbi):
-	'''
-	checks amount of days in feed table and sets to move if reach requirement
+    '''
+    checks amount of days in feed table and sets to move if reach requirement
 
-	Args:
-		dbi (object): database interface object
-	'''
-	with dbi.session_scope() as s:
-		table = getattr(pdbi, 'Feed')
-		count_FEEDs = s.query(getattr(table, 'julian_day'), label('count', func.count(getattr(table, 'julian_day'))))\
-								.group_by(getattr(table, 'julian_day')).all()
-		all_FEEDs = s.query(table).all()
-		good_days = tuple(getattr(FEED, 'julian_day') for FEED in count_FEEDs if getattr(FEED, 'count') == 288 or getattr(FEED, 'count') == 72)
-		to_move = tuple(getattr(FEED, 'full_path') for FEED in all_FEEDs if getattr(FEED, 'julian_day') in good_days)
+    Parameters
+    ----------
+    dbi | object: database interface object
+    '''
+    with dbi.session_scope() as s:
+        table = pdbi.Feed
+        count_FEEDs = s.query(table.julian_day, label('count', func.count(table.julian_day))).group_by(table.julian_day).all()
+        all_FEEDs = s.query(table).all()
+        good_days = tuple(FEED.julian_day for FEED in count_FEEDs if FEED.count in (72, 288))
 
-		for full_path in to_move:
-			FEED = dbi.get_entry(s, 'Feed', source)
-			dbi.set_entry(s, FEED, 'is_movable', True)
+        to_move = (FEED.source for FEED in all_FEEDs if FEED.julian_day in good_days)
 
-	return None
+        for source in to_move:
+            FEED = dbi.get_entry(s, 'Feed', source)
+            dbi.set_entry(s, FEED, 'is_movable', True)
 
 def find_data(dbi):
-	'''
-	finds data to move from feed table
+    '''
+    finds data to move from feed table
+    moves only one day at a time
 
-	Args:
-		dbi (object): database interface object
+    Parameters
+    ----------
+    dbi | object: database interface object
 
-	Returns:
-		tuple:
-			list: file paths to move
-			str: file host
-			list: filenames to be moved
-	'''
-	with dbi.session_scope() as s:
-		table = getattr(pdbi, 'Feed')
-		FEEDs = s.query(table).filter(getattr(table, 'is_moved') == False).filter(getattr(table, 'is_movable') == True).all()
+    Returns
+    -------
+    tuple:
+        str: file host
+        list[str]: file paths to move
+    '''
+    with dbi.session_scope() as s:
+        table = pdbi.Feed
+        FEEDs = s.query(table).filter(table.is_moved == False).filter(table.is_movable == True).all()
 
-	#only move one day at a time
-	feed_host = FEEDs[0].host
-	feed_day = FEEDs[0].julian_day
-	feed_paths = tuple(os.path.join(getattr(FEED, 'path'), getattr(FEED, 'filename'))
-						for FEED in FEEDs if getattr(FEED, 'julian_day') == feed_day)
-	feed_filenames = tuple(getattr(FEED, 'filename') for FEED in FEEDs if getattr(FEED, 'julian_day') == feed_day)
+        feed_host = FEEDs[0].host
+        feed_paths = tuple(os.path.join(FEED.base_path, FEED.filename) for FEED in FEEDs if FEED.julian_day == FEEDs[0].julian_day)
 
-	return feed_paths, feed_host, feed_filenames
-
-def email_paperfeed(files):
-	'''
-	emails people that files are being moved to feed
-
-	Args:
-		files (list): files being moved
-	'''
-	server = smtplib.SMTP('smtp.gmail.com', 587)
-	server.ehlo()
-	server.starttls()
-
-	#Next, log in to the server
-	server.login('paperfeed.paper@gmail.com', 'papercomesfrom1tree')
-
-	header = 'From: PAPERFeed <paperfeed.paper@gmail.com>\nSubject: FILES ARE BEING MOVED\n'
-	msgs = header
-	#Send the mail
-	for filename in files:
-		msgs = ''.join(msgs, '\n', filename, ' is being moved.\n')
-
-	server.sendmail('paperfeed.paper@gmail.com', 'immwa@sas.upenn.edu', msgs)
-	server.sendmail('paperfeed.paper@gmail.com', 'jaguirre@sas.upenn.edu', msgs)
-	server.sendmail('paperfeed.paper@gmail.com', 'saul.aryeh.kohn@gmail.com', msgs)
-	server.sendmail('paperfeed.paper@gmail.com', 'jacobsda@sas.upenn.edu', msgs)
-
-	server.quit()
-
-	return None
+    return feed_host, feed_paths
 
 def feed_bridge(dbi):
-	'''
-	bridges feed and paperdistiller
-	moves files and pulls relevant data to add to paperdistiller from feed
+    '''
+    bridges feed and paperdistiller
+    moves files and pulls relevant data to add to paperdistiller from feed
 
-	Args:
-		dbi (object): database interface object
-	'''
-	#Minimum amount of space to move a day ~3.1TiB
-	required_space = 1112373311360
-	output_dir = '/data4/paper/feed/' #CHANGE WHEN KNOW WHERE DATA USUALLY IS STORED
+    Parameters
+    ----------
+    dbi | object: database interface object
+    '''
+    #Minimum amount of memory to move a day ~3.1TiB
+    required_memory = 1112373311360
+    dest_path = '/data4/paper/feed/' #CHANGE WHEN KNOW WHERE DATA USUALLY IS STORED
 
-	#Move if there is enough free space
-	if move_files.enough_space(required_space, output_dir):
-		#check how many days are in each
-		count_days(dbi)
-		#FIND DATA
-		input_paths, input_host, input_filenames = find_data(dbi)
-		#pick directory to output to
-		output_host = 'folio'
-		#MOVE DATA AND UPDATE PAPERFEED TABLE THAT FILES HAVE BEEN MOVED, AND THEIR NEW PATHS
-		move_feed_files(dbi, input_host, input_paths, output_host, output_dir)
-		#EMAIL PEOPLE THAT DATA IS BEING MOVED AND LOADED
-		email_paperfeed(input_paths)
-		#ADD_OBSERVATIONS.PY ON LIST OF DATA IN NEW LOCATION
-		out_dir = os.path.join(output_dir, 'zen.*.uv')
-		add_obs = 'python /usr/global/paper/CanopyVirtualEnvs/PAPER_Distiller/bin/add_observations.py {out_dir}'.format(out_dir=out_dir)
-		#shell = True because wildcards can't be done without it
-		subprocess.call(add_obs, shell=True)
-	else:
-		table = 'Feed'
-		move_files.email_space(table)
-		time.sleep(21600)
-
-	return None
+    #Move if there is enough free memory
+    if memory.enough_memory(required_memory, dest_path):
+        #check how many days are in each
+        count_days(dbi)
+        #FIND DATA
+        source_host, source_paths = find_data(dbi)
+        #pick directory to output to
+        dest_host = 'folio'
+        #MOVE DATA AND UPDATE PAPERFEED TABLE THAT FILES HAVE BEEN MOVED, AND THEIR NEW PATHS
+        move_feed_files(dbi, source_host, source_paths, dest_host, dest_path)
+        #ADD FILES TO PAPERDISTILLER ON LIST OF DATA IN NEW LOCATION
+        dest_dir = os.path.join(dest_path, 'zen.*.uv')
+        obs_paths = glob.glob(dest_dir)
+        distill_files.add_files_to_distill(obs_paths)
+    else:
+        table = 'Feed'
+        memory.email_memory(table)
+        time.sleep(21600)
 
 if __name__ == '__main__':
-	dbi = pdbi.DataBaseInterface()
-	feed_bridge(dbi)
+    dbi = pdbi.DataBaseInterface()
+    feed_bridge(dbi)

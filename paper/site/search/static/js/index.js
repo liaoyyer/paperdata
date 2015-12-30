@@ -31,12 +31,30 @@ $(function() {
 		sessionStorage.endDate = nowStr;
 	}
 
+	var jd_startPicker = $('#jd_start');
+	var jd_endPicker = $('#jd_end');
+
+	if (jd_startPicker.val().length > 0 && jd_endPicker.val().length > 0) {
+		// The date pickers have already been filled with values, which means we're viewing a set.
+		// Nothing needs to be done.
+	} else if (sessionStorage.jd_start && sessionStorage.jd_end) {
+		jd_startPicker.val(sessionStorage.jd_start);
+		jd_endPicker.val(sessionStorage.jd_end);
+	} else {
+		var nothing = '';
+		jd_startPicker.val(nothing);
+		jd_endPicker.val(nothing);
+
+		sessionStorage.jd_start = nothing;
+		sessionStorage.jd_end = nothing;
+	}
+
 	//global ajax vars
 	window.setRequest = null;
-	window.dataAmountRequest = null;
-	window.sourceRequest = null;
-	window.filesystemRequest = null;
 	window.dataSummaryTableRequest = null;
+	window.daySummaryTableRequest = null;
+	window.obsTableRequest = null;
+	window.fileTableRequest = null;
 
 	// Set up the tabs.
 	$('#tabs').tabs({
@@ -60,20 +78,7 @@ $(function() {
 		}
 	});
 
-	$('#filter_dropdown_div').html('<img src="/static/images/ajax-loader.gif" class="loading"/>');
-
-	$.ajax({
-		type: 'GET',
-		url: '/get_filters',
-		success: function(data) {
-			$('#filter_dropdown_div').html(data);
-			applyFiltersAndSort();
-		},
-		dataType: 'html'
-	});
-
 	getObservations(false /* Don't load the first tab, it's already being loaded */);
-	getComments();
 });
 
 function getDateTimeString(now) {
@@ -92,16 +97,21 @@ function abortRequestIfPending(request) {
 	return request;
 };
 
-function getObservations(loadTab) {
-	window.dataSummaryTableRequest = abortRequestIfPending(window.dataSummaryTableRequest);
-
+function saveTable(table) {
+	window.saveTableRequest = abortRequestIfPending(window.saveTableRequest);
 	var start = $('#datepicker_start').val();
 	var end = $('#datepicker_end').val();
 	re = /^\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}$/;
 
+	var jd_start = $('#jd_start').val();
+	var jd_end = $('#jd_end').val();
+
 	// Update the sessionStorage
 	sessionStorage.startDate = start;
 	sessionStorage.endDate = end;
+
+	sessionStorage.jd_start = jd_start;
+	sessionStorage.jd_end = jd_end;
 
 	var startDate, endDate;
 
@@ -119,6 +129,93 @@ function getObservations(loadTab) {
 		return;
 	}
 
+	var startUTC = startDate.toISOString().slice(0, 19) + 'Z';
+	var endUTC = endDate.toISOString().slice(0, 19) + 'Z';
+
+	var polarization = $('#polarization_dropdown').val();
+	var era_type = $('#era_type_dropdown').val();
+	var host = $('#host_dropdown').val();
+	var filetype = $('#filetype_dropdown').val();
+
+	if (table === 'obs') {
+		window.saveTableRequest = $.ajax({
+			type: 'POST',
+			url: '/save_obs',
+			data: {
+				'starttime': startUTC,
+				'endtime': endUTC,
+				'jd_start': jd_start,
+				'jd_end': jd_end,
+				'polarization': polarization,
+				'era_type': era_type,
+			},
+			success: function(data) {
+				window.alert(JSON.stringify(data));
+			},
+			dataType: 'json'
+		});
+	} else if (table === 'files') {
+		window.saveTableRequest = $.ajax({
+			type: 'POST',
+			url: '/save_files',
+			data: {
+				'starttime': startUTC,
+				'endtime': endUTC,
+				'jd_start': jd_start,
+				'jd_end': jd_end,
+				'host': host,
+				'filetype': filetype,
+			},
+			success: function(data) {
+				window.alert(JSON.stringify(data));
+			},
+			dataType: 'json'
+		});
+	} else {
+		alert('Invalid json');
+		return;
+	}
+};
+
+function getObservations(loadTab) {
+	window.dataSummaryTableRequest = abortRequestIfPending(window.dataSummaryTableRequest);
+	window.daySummaryTableRequest = abortRequestIfPending(window.daySummaryTableRequest);
+	window.obsTableRequest = abortRequestIfPending(window.obsTableRequest);
+	window.fileTableRequest = abortRequestIfPending(window.fileTableRequest);
+
+	var start = $('#datepicker_start').val();
+	var end = $('#datepicker_end').val();
+	re = /^\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}$/;
+
+	var jd_start = $('#jd_start').val();
+	var jd_end = $('#jd_end').val();
+
+	// Update the sessionStorage
+	sessionStorage.startDate = start;
+	sessionStorage.endDate = end;
+
+	sessionStorage.jd_start = jd_start;
+	sessionStorage.jd_end = jd_end;
+
+	var startDate, endDate;
+
+	if (start.match(re)) {
+		startDate = getDate(start);
+	} else {
+		alert('Invalid datetime format: ' + start);
+		return;
+	}
+
+	if (end.match(re)) {
+		endDate = getDate(end);
+	} else {
+		alert('Invalid datetime format: ' + end);
+		return;
+	}
+
+	$('#obs_table').html('<img src="/static/images/ajax-loader.gif" class="loading"/>');
+	$('#file_table').html('<img src="/static/images/ajax-loader.gif" class="loading"/>');
+
 	// Load the currently selected tab if it's not already being loaded.
 	if (loadTab) {
 		$('#tabs > ul > li').each(function(index) {
@@ -134,37 +231,80 @@ function getObservations(loadTab) {
 
 	if (loadTab) { // The user pressed the 'Get observations' button, so they're viewing a date range now.
 		$('#set_or_date_range_label').html('date range');
-		$('#set_details').hide();
 	}
 
-	$('#summary_table').html('<img src="/static/images/ajax-loader.gif" class="loading"/>');
+	$('#data_summary_table').html('<img src="/static/images/ajax-loader.gif" class="loading"/>');
+	$('#day_summary_table').html('<img src="/static/images/ajax-loader.gif" class="loading"/>');
 
 	// Make each date into a string of the format 'YYYY-mm-ddTHH:MM:SSZ', which is the format used in the local database.
 	var startUTC = startDate.toISOString().slice(0, 19) + 'Z';
 	var endUTC = endDate.toISOString().slice(0, 19) + 'Z';
 
-	window.dataSummaryTableRequest = $.ajax({
+	var polarization = $('#polarization_dropdown').val();
+	var era_type = $('#era_type_dropdown').val();
+	var host = $('#host_dropdown').val();
+	var filetype = $('#filetype_dropdown').val();
+
+	window.obsTableRequest = $.ajax({
 		type: 'POST',
-		url: '/data_summary_table',
-		data: {'starttime': startUTC, 'endtime': endUTC},
+		url: '/obs_table',
+		data: {
+			'starttime': startUTC,
+			'endtime': endUTC,
+			'jd_start': jd_start,
+			'jd_end': jd_end,
+			'polarization': polarization,
+			'era_type': era_type,
+		},
 		success: function(data) {
-			$('#summary_table').html(data);
+			$('#obs_table').html(data);
 		},
 		dataType: 'html'
 	});
-};
 
-function getComments() {
-	$('#comments_div').html('<img src="/static/images/ajax-loader.gif" class="loading"/>');
-
-	$.ajax({
-		type: 'GET',
-		url: '/get_all_comments',
+	window.fileTableRequest = $.ajax({
+		type: 'POST',
+		url: '/file_table',
+		data: {
+			'starttime': startUTC,
+			'endtime': endUTC,
+			'jd_start': jd_start,
+			'jd_end': jd_end,
+			'host': host,
+			'filetype': filetype,
+		},
 		success: function(data) {
-			$('#comments_div').html(data);
-			$('#comments_list').collapsible({
-				animate: false
-			});
+			$('#file_table').html(data);
+		},
+		dataType: 'html'
+	});
+
+	window.dataSummaryTableRequest = $.ajax({
+		type: 'POST',
+		url: '/data_summary_table',
+		data: {
+			'starttime': startUTC,
+			'endtime': endUTC,
+			'jd_start': jd_start,
+			'jd_end': jd_end,
+		},
+		success: function(data) {
+			$('#data_summary_table').html(data);
+		},
+		dataType: 'html'
+	});
+
+	window.daySummaryTableRequest = $.ajax({
+		type: 'POST',
+		url: '/day_summary_table',
+		data: {
+			'starttime': startUTC,
+			'endtime': endUTC,
+			'jd_start': jd_start,
+			'jd_end': jd_end,
+		},
+		success: function(data) {
+			$('#day_summary_table').html(data);
 		},
 		dataType: 'html'
 	});
@@ -177,38 +317,4 @@ function getDate(datestr) {
 	var hour = datestr.substring(11, 13);
 	var minute = datestr.substring(14, 16);
 	return new Date(Date.UTC(year, month - 1, day, hour, minute, 0));
-};
-
-var applyFiltersAndSort = function() {
-	var user = $('#user_setlist_dropdown').val();
-	var polarization = $('#polarization_setlist_dropdown').val();
-	var era_type = $('#era_type_setlist_dropdown').val();
-	var host = $('#host_setlist_dropdown').val();
-	var filetype = $('#filetype_setlist_dropdown').val();
-	var sort = $('#sort_setlist_dropdown').val();
-	var ranged = $('#range_filter').prop('checked');
-
-	var set_controls = {
-		'user': user,
-		'polarization': polarization,
-		'era_type': era_type,
-		'host': host,
-		'filetype': filetype,
-		'sort': sort,
-		'ranged': ranged
-	};
-
-	var start = $('#datepicker_start').val();
-	var end = $('#datepicker_end').val();
-
-	var startDate, endDate;
-
-	startDate = getDate(start);
-	endDate = getDate(end);
-
-	// Make each date into a string of the format 'YYYY-mm-ddTHH:MM:SSZ', which is the format used in the local database.
-	var startUTC = startDate.toISOString().slice(0, 19) + 'Z';
-	var endUTC = endDate.toISOString().slice(0, 19) + 'Z';
-
-	renderSets(set_controls, startUTC, endUTC, false);
 };

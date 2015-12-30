@@ -1,139 +1,120 @@
-#!/usr/bin/python
-# -*- coding: utf-8 -*-
-# Load data into MySQL table 
+'''
+paper.data.scripts.feed_files
 
+adds files to feed table in paperdata database
+
+author | Immanuel Washington
+
+Functions
+---------
+gen_feed_data | pulls relevant field information from uv file
+dupe_check | checks to see any files to be added already exist in database
+add_feeds_to_db | adds entries to feed table
+add_feeds | parses list of files then adds them to paperdata database
+'''
 from __future__ import print_function
-import sys
 import os
 import time
-import glob
-import socket
+import uuid
 import aipy as A
 import paper as ppdata
-from paper.data import dbi as pdbi
+from paper.data import dbi as pdbi, file_data
 
-### Script to load data from anywhere into paperfeed database
-### Crawls folio or elsewhere and reads through .uv files to generate all field information
-### DOES NOT MOVE ANY DATA
+def gen_feed_data(host, path):
+    '''
+    generates data for feed table
 
-### Author: Immanuel Washington
-### Date: 05-18-14
+    Parameters
+    ----------
+    host | str: system host
+    path | str: path of uv* file
 
-def gen_feed_data(host, full_path):
-	'''
-	generates data for feed table
+    Returns
+    -------
+    tuple:
+        dict: feed values
+        dict: log values
+    '''
+    try:
+        uv = A.miriad.UV(path)
+    except:
+        return (None,) * 2
 
-	Args:
-		host (str): system host
-		full_path (str): full path of uv* file
+    base_path, filename = os.path.split(path)
+    source = ':'.join((host, path))
 
-	Returns:
-		tuple:
-			dict: feed values
-			dict: log values
-	'''
-	#allows uv access
-	try:
-		uv = A.miriad.UV(full_path)
-	except:
-		return None
+    timestamp = int(time.time())
 
-	timestamp = int(time.time())
+    feed_data = {'host': host,
+                'base_path': base_path,
+                'filename': filename,
+                'source': source,
+                'julian_day': int(uv['time']),
+                'is_movable': False,
+                'is_moved': False,
+                'timestamp': timestamp}
 
-	feed_data = {'host': host,
-				'path': os.path.dirname(full_path)
-				'filename': os.path.basename(full_path)
-				'full_path': full_path,
-				'julian_day': int(uv['time']),
-				'is_movable': False,
-				'is_moved': False,
-				'timestamp': timestamp}
+    log_data = {'action': 'add by feed',
+                'table': 'Feed',
+                'identifier': source,
+                'log_id': str(uuid.uuid4()),
+                'timestamp': timestamp}
 
-	log_data = {'action': 'add by feed',
-				'table': 'feed',
-				'identifier': full_path,
-				'timestamp': timestamp}
+    return feed_data, log_data
 
-	return feed_data, log_data
+def dupe_check(dbi, source_host, source_paths):
+    '''
+    checks for files already in feed table on the same host
 
-def dupe_check(dbi, input_host, input_paths):
-	'''
-	checks for files already in feed table
+    Parameters
+    ----------
+    dbi | object: database interface object
+    source_host | str: file host
+    source_paths | list[str]: file paths
 
-	Args:
-		dbi (object): database interface object
-		input_host (str): file host
-		input_paths (list): file paths
+    Returns
+    -------
+    list[str]: files not in feed table
+    '''
+    with dbi.session_scope() as s:
+        table = pdbi.Feed
+        FEEDs = s.query(table).filter(table.host == source_host).all()
+        all_paths = tuple(os.path.join(FEED.base_path, FEED.filename) for FEED in FEEDs)
 
-	Returns:
-		list: files not in feed table
-	'''
-	with dbi.session_scope() as s:
-		table = getattr(pdbi, 'Feed')
-		FEEDs = s.query(table).all()
-	#all files on same host
-	filenames = tuple(os.path.join(getattr(FEED, 'path'), getattr(FEED, 'filename')) for FEED in FEEDs if getattr(FEED, 'host') == input_host)
+    unique_paths = tuple(source_path for source_path in source_paths if source_path not in all_paths)
+        
+    return unique_paths
 
-	#for each input file, check if in filenames
-	unique_paths = tuple(input_path for input_path in input_paths if input_path not in filenames)
-		
-	return unique_paths
+def add_feeds_to_db(dbi, source_host, source_paths):
+    '''
+    adds feed file data to table
 
-def add_feeds_to_db(dbi, input_host, input_paths):
-	'''
-	adds feed file data to table
+    Parameters
+    ----------
+    dbi | object: database interface object
+    source_host | str: file host
+    source_paths | list[str]: file paths
+    '''
+    with dbi.session_scope() as s:
+        for source_path in source_paths:
+            feed_data, log_data = gen_feed_data(source_host, source_path)
+            dbi.add_entry_dict(s, 'Feed', feed_data)
+            dbi.add_entry_dict(s, 'Log', log_data)
 
-	Args:
-		dbi (object): database interface object
-		input_host (str): file host
-		input_paths (list): file paths
-	'''
-	with dbi.session_scope() as s:
-		for source in input_paths:
-			feed_data, log_data = gen_feed_data(input_host, source)
-			dbi.add_entry_dict(s, 'Feed', feed_data)
-			dbi.add_entry_dict(s, 'Log', log_data)
+def add_feeds(dbi, source_host, source_paths):
+    '''
+    generates list of input files, check for duplicates, add information to database
 
-	return None
-
-def add_feeds(dbi, input_host, input_paths):
-	'''
-	generates list of input files, check for duplicates, add information to database
-
-	Args:
-		dbi (object): database interface object
-		input_host (str): file host
-		input_paths (str): file paths string
-	'''
-	named_host = socket.gethostname()
-	if named_host == input_host:
-		input_paths = glob.glob(input_paths)
-	else:
-		with ppdata.ssh_scope(input_host) as ssh:
-			input_paths = raw_input('Source directory path: ')
-			_, path_out, _ = ssh.exec_command('ls -d {input_paths}'.format(input_paths=input_paths))
-			input_paths = path_out.read().split('\n')[:-1]
-
-	output_host = 'folio'
-	feed_output = '/data4/paper/feed/'
-	input_paths = dupe_check(dbi, input_host, input_paths)
-	add_feeds_to_db(dbi, input_host, input_paths)
-
-	return None
+    Parameters
+    ----------
+    dbi | object: database interface object
+    source_host | str: file host
+    source_paths | list[str]: list of file paths
+    '''
+    source_paths = dupe_check(dbi, source_host, source_paths)
+    add_feeds_to_db(dbi, source_host, source_paths)
 
 if __name__ == '__main__':
-	if len(sys.argv) == 2:
-		input_host = sys.argv[1].split(':')[0]
-		if input_host == sys.argv[1]:
-			print('Needs host')
-			sys.exit()
-		input_paths = sys.argv[1].split(':')[1]
-	elif len(sys.argv) == 3:
-		input_host = sys.argv[1]
-		input_paths = sys.argv[2]
-	else:
-		input_host = raw_input('Source directory host: ')
-		input_paths = raw_input('Source directory path: ')
-
-	dbi = pdbi.DataBaseInterface()
-	add_feeds(dbi, input_host, input_paths)
+    source_host, source_paths = file_data.source_info()
+    dbi = pdbi.DataBaseInterface()
+    add_feeds(dbi, source_host, source_paths_str)

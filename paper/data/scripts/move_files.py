@@ -1,176 +1,115 @@
-#!/usr/bin/python
-# -*- coding: utf-8 -*-
-# Add files to paper
+'''
+paper.data.scripts.move_files
 
+moves files and updates database with new host and path
+
+author | Immanuel Washington
+
+Functions
+---------
+exist_check | checks to see if files to be moved all exist in database
+set_move_table | updates database with moved file status
+move_files | parses list of files then moves them
+'''
 from __future__ import print_function
-import sys
-import time
-import subprocess
+import os
 import glob
 import socket
-import os
 import shutil
-import psutil
+import time
+import uuid
 import paper as ppdata
-from paper.data import dbi as pdbi
-from email.MIMEMultipart import MIMEMultipart
-from email.MIMEBase import MIMEBase
-from email import Encoders
+from paper.data import dbi as pdbi, file_data
 
-### Script to move files and update paper database
-### Move files and update db using dbi
+def exist_check(dbi, source_host, source_paths):
+    '''
+    checks if file(s) is(are) in database
 
-### Author: Immanuel Washington
-### Date: 5-06-15
+    Parameters
+    ----------
+    dbi | object: database interface object
+    source_host | str: host of files
+    source_paths | list[str]: uv* file paths
 
-def enough_space(required_space, space_path):
-	'''
-	checks path for enough space
+    Returns
+    -------
+    bool: are all files in the database
+    '''
+    with dbi.session_scope() as s:
+        table = pdbi.File
+        FILEs = s.query(table).filter(table.host == source_host).all()
+        paths = tuple(os.path.join(FILE.path, FILE.filename) for FILE in FILEs)
 
-	Args:
-		required_space (int): amount of space needed in bytes
-		space_path (str): path to check for spacce
+    return all(source_path in paths for source_path in source_paths)
 
-	Returns:
-		bool: is there enough space
-	'''
-	free_space = psutil.disk_usage(space_path).free
+def set_move_table(s, dbi, source_host, source_path, dest_host, dest_path):
+    '''
+    updates table for moved file
 
-	if required_space < free_space:
-		return True
+    Parameters
+    ----------
+    s | object: session object
+    dbi | object: database interface object
+    source_host | str: user host
+    source_path | str: source file path
+    dest_host | str: output host
+    dest_path | str: output directory
+    '''
+    source = ':'.join((source_host, source_path))
+    timestamp = int(time.time())
+    FILE = dbi.get_entry(s, 'File', source)
+    move_dict = {'host': dest_host,
+                'base_path': dest_path,
+                'timestamp': timestamp}
+    dbi.set_entry_dict(s, FILE, move_dict)
 
-	return False
+    log_data = {'action': 'move',
+                'table': 'File',
+                'identifier': FILE.source,
+                'log_id': str(uuid.uuid4()),
+                'timestamp': timestamp}
+    dbi.add_entry_dict(s, 'Log', log_data)
 
-def email_space(table):
-	'''
-	emails people if there is not enough space on folio
+def move_files(dbi, source_host=None, source_paths=None, dest_host=None, dest_path=None):
+    '''
+    move files by rsyncing them and checking md5sum through rsync option
 
-	Args:
-		table (str): table name
-	'''
-	server = smtplib.SMTP('smtp.gmail.com', 587)
-	server.ehlo()
-	server.starttls()
+    Parameters
+    ----------
+    dbi | object: database interface object
+    source_host | str: file host --defaults to None
+    source_paths | list[str]: file paths --defaults to None
+    dest_host | str: output host --defaults to None
+    dest_path | str: output directory --defaults to None
+    '''
+    dest_host = raw_input('Destination directory host: ') if dest_host is None else dest_host
+    dest_path = raw_input('Destination directory: ') if dest_path is None else dest_path
 
-	#Next, log in to the server
-	server.login('paperfeed.paper@gmail.com', 'papercomesfrom1tree')
+    if source_host is None or source_paths is None:
+        source_host, source_paths = file_data.source_info()
 
-	#Send the mail
-	header = 'From: PAPERBridge <paperfeed.paper@gmail.com>\nSubject: NOT ENOUGH SPACE ON FOLIO\n'
-	msgs = ''.join((header, '\nNot enough space for ', table, ' on folio'))
+    is_existent = exist_check(source_host, source_paths)
+    if not is_existent:
+        print('File(s) not in database')
+        return
 
-	server.sendmail('paperfeed.paper@gmail.com', 'immwa@sas.upenn.edu', msgs)
-	server.sendmail('paperfeed.paper@gmail.com', 'jaguirre@sas.upenn.edu', msgs)
-	server.sendmail('paperfeed.paper@gmail.com', 'saul.aryeh.kohn@gmail.com', msgs)
-	server.sendmail('paperfeed.paper@gmail.com', 'jacobsda@sas.upenn.edu', msgs)
-
-	server.quit()
-
-	return None
-
-def null_check(dbi, input_host, input_paths):
-	'''
-	checks if file(s) is(are) in database
-
-	Args:
-		dbi (object): database interface object
-		input_host (str): host of files
-		input_paths (list): uv* file paths
-
-	Returns:
-		bool: are there any files not in database -- True if there are None
-	'''
-	with dbi.session_scope() as s:
-		table = getattr(pdbi, 'File')
-		FILEs = s.query(table).filter(getattr(table, 'host') == input_host).all()
-	#all files on same host
-	filenames = tuple(os.path.join(getattr(FILE, 'path'), getattr(FILE, 'filename')) for FILE in FILEs)
-
-	#for each input file, check if in filenames
-	nulls = tuple(input_path for input_path in input_paths if input_path not in filenames)
-		
-	if len(nulls) > 0:
-		return False
-
-	return True
-
-def set_move_table(s, dbi, input_host, source, output_host, output_dir):
-	'''
-	updates table for moved file
-
-	Args:
-		s (object): session object
-		dbi (object): database interface object
-		input_host (str): user host
-		source (str): source file
-		output_host (str): output host
-		output_dir (str): output directory
-	'''
-	full_path = ''.join((input_host, ':', source))
-	timestamp = int(time.time())
-	FILE = dbi.get_entry(s, 'File', full_path)
-	dbi.set_entry(s, FILE, 'host', output_host)
-	dbi.set_entry(s, FILE, 'path', output_dir)
-	dbi.set_entry(s, FILE, 'timestamp', timestamp)
-	identifier = getattr(FILE, 'full_path')
-	log_data = {'action': 'move',
-				'table': 'file',
-				'identifier': identifier,
-				'timestamp': timestamp}
-	dbi.add_entry_dict(s, 'Log', log_data)
-
-	return None
-
-def move_files(dbi, input_host=None, input_paths=None, output_host=None, output_dir=None):
-	'''
-	move files
-
-	Args:
-		dbi (object): database interface object
-		input_host (str): file host --defaults to None
-		input_paths (list): file paths --defaults to None
-		output_host (str): output host --defaults to None
-		output_dir (str): output directory --defaults to None
-	'''
-	named_host = socket.gethostname()
-	input_host = raw_input('Source directory host: ') if input_host is None else input_host
-	output_host = raw_input('Destination directory host: ') if output_host is None else output_host
-	output_dir = raw_input('Destination directory: ') if output_dir is None else output_dir
-
-	if input_paths is None:
-		if named_host == input_host:
-			input_paths = sorted(glob.glob(raw_input('Source directory path: ')))
-		else:
-			with ppdata.ssh_scope(host) as ssh:
-				input_paths = raw_input('Source directory path: ')
-				_, path_out, _ = ssh.exec_command('ls -d {input_paths}'.format(input_paths=input_paths))
-				input_paths = sorted(path_out.read().split('\n')[:-1])
-	
-	nulls = null_check(input_host, input_paths)
-	if not nulls:
-		#if any file not in db -- don't move anything
-		print('File(s) not in database')
-		return None
-
-	destination = ''.join((output_host, ':', output_dir))
-	if named_host == input_host:
-		with dbi.session_scope() as s:
-			for source in input_paths:
-				ppdata.rsync_copy(source, destination)
-				set_move_table(s, dbi, input_host, source, output_host, output_dir)
-				shutil.rmtree(source)
-	else:
-		with ppdata.ssh_scope(input_host) as ssh:
-			for source in input_paths:
-				rsync_copy_command = '''rsync -ac {source} {destination}'''.format(source=source, destination=destination)
-				rsync_del_command = '''rm -r {source}'''.format(source=source)
-				ssh.exec_command(rsync_copy_command)
-				set_move_table(input_host, source, output_host, output_dir)
-				ssh.exec_command(rsync_del_command)
-	print('Completed transfer')
-
-	return None
+    destination = ':'.join((dest_host, dest_path))
+    with dbi.session_scope() as s:
+        if source_host == socket.gethostname():
+            for source_path in source_paths:
+                ppdata.rsync_copy(source_path, destination)
+                set_move_table(s, dbi, source_host, source_path, dest_host, dest_path)
+                shutil.rmtree(source_path)
+        else:
+            with ppdata.ssh_scope(source_host) as ssh:
+                for source_path in source_paths:
+                    rsync_copy_command = '''rsync -ac {source_path} {destination}'''.format(source_path=source_path, destination=destination)
+                    rsync_del_command = '''rm -r {source_path}'''.format(source_path=source_path)
+                    ssh.exec_command(rsync_copy_command)
+                    set_move_table(s, dbi, source_host, source_path, dest_host, dest_path)
+                    ssh.exec_command(rsync_del_command)
+    print('Completed transfer')
 
 if __name__ == '__main__':
-	dbi = pdbi.DataBaseInterface()
-	move_files(dbi)
+    dbi = pdbi.DataBaseInterface()
+    move_files(dbi)
